@@ -136,7 +136,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Documentation
 
 For more detailed information about the SeisComP inventory XML structure, please refer to:
-- [SeisComP Documentation](https://www.seiscomp.de/doc/base/inventory.html)
+- [SeisComP Documentation](https://www.seiscomp.de/doc/base/concepts/inventory.html#inventory)
 - [FDSN Station XML Format](http://www.fdsn.org/xml/station/)
 
 ## Author
