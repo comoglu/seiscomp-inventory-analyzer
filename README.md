@@ -141,7 +141,7 @@ For more detailed information about the SeisComP inventory XML structure, please
 
 ## Author
 
-- [Utku Çomoğlu](https://github.com/comoglu)
+- [Mustafa Çomoğlu](https://github.com/comoglu)
 
 ## Acknowledgments
 
