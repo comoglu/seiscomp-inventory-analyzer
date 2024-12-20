@@ -534,23 +534,36 @@ class SeisCompInventoryEditor(QMainWindow):
         """Helper method to update element text with namespace"""
         elem = element.find(f'sc3:{tag}', self.ns)
         if elem is None:
-            elem = ET.SubElement(element, f'{{{self.ns["sc3"]}}}{tag}')
-        elem.text = value
+            if value:  # Only create new elements for non-empty values
+                elem = ET.SubElement(element, f'{{{self.ns["sc3"]}}}{tag}')
+        if value:
+            elem.text = value
+        elif elem is not None:
+            element.remove(elem)  # Remove element if value is empty
 
     def update_station(self):
         if hasattr(self, 'current_element'):
             try:
-                self.current_element.set('code', self.station_code.text())
-                self.current_element.set('name', self.station_name.text())
+                # Only set attributes if they have non-empty values
+                if self.station_code.text():
+                    self.current_element.set('code', self.station_code.text())
+                if self.station_name.text():
+                    self.current_element.set('name', self.station_name.text())
+                elif 'name' in self.current_element.attrib:
+                    del self.current_element.attrib['name']  # Remove empty name attribute
+                    
+                # Update element texts
                 self._update_element_text(self.current_element, 'description', self.station_description.text())
                 self._update_element_text(self.current_element, 'latitude', self.station_lat.text())
                 self._update_element_text(self.current_element, 'longitude', self.station_lon.text())
                 self._update_element_text(self.current_element, 'elevation', self.station_elevation.text())
+                
                 self.populate_tree()
                 self.unsaved_changes = True
                 self.statusBar.showMessage("Station updated successfully", 5000)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to update station: {str(e)}")
+
 
     def update_sensor(self):
         if hasattr(self, 'current_element'):
