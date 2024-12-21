@@ -1,12 +1,13 @@
+# SeisComP Inventory Editor GUI
 #!/usr/bin/env python3
 
 import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                           QHBoxLayout, QTreeWidget, QTreeWidgetItem, QLabel, 
-                           QPushButton, QFileDialog, QMessageBox, QLineEdit,
-                           QFormLayout, QGroupBox, QTabWidget, QStyle, 
-                           QStatusBar, QFrame, QSplitter, QMenu, QAction)
-from PyQt5.QtCore import Qt, QSettings
+                           QHBoxLayout, QTreeWidget, QTreeWidgetItem,QTreeWidgetItemIterator, 
+                           QLabel, QPushButton, QFileDialog, QMessageBox, QLineEdit,
+                           QFormLayout, QGroupBox, QTabWidget, QStyle, QStatusBar, 
+                           QFrame, QSplitter, QMenu, QAction)
+from PyQt5.QtCore import Qt, QSettings, QTimer
 from PyQt5.QtGui import QIcon, QPalette, QColor
 from xml.etree import ElementTree as ET
 from pathlib import Path
@@ -19,6 +20,7 @@ class ValidationLineEdit(QLineEdit):
         self.validator = validator
         self.required = required
         self.textChanged.connect(self.validate)
+        self.editingFinished.connect(self.on_editing_finished)
         self.setStyleSheet("""
             QLineEdit { padding: 5px; border: 1px solid #ccc; border-radius: 3px; }
             QLineEdit:focus { border-color: #66afe9; }
@@ -37,6 +39,10 @@ class ValidationLineEdit(QLineEdit):
             QLineEdit:focus { border-color: #66afe9; }
         """)
         return True
+        
+    def on_editing_finished(self):
+        if self.parent() and hasattr(self.parent(), 'handle_editing_finished'):
+            self.parent().handle_editing_finished()
 
 class SeisCompInventoryEditor(QMainWindow):
     def __init__(self):
@@ -47,8 +53,48 @@ class SeisCompInventoryEditor(QMainWindow):
         self.root = None
         self.settings = QSettings('SeisCompEditor', 'InventoryEditor')
         self.unsaved_changes = False
+        
+        # Initialize autosave timer
+        self.autosave_timer = QTimer()
+        self.autosave_timer.setSingleShot(True)
+        self.autosave_timer.timeout.connect(self.perform_autosave)
+        
         self.initUI()
         self.loadSettings()
+
+
+    def perform_autosave(self):
+        """Perform the actual autosave"""
+        if self.unsaved_changes and self.current_file:
+            try:
+                self.save_xml()
+                self.statusBar.showMessage("Autosaved", 2000)
+                self.autosave_label.setText("Changes Saved")
+                self.autosave_label.setStyleSheet("color: green; padding: 2px 5px; border: 1px solid green; border-radius: 3px;")
+            except Exception as e:
+                self.statusBar.showMessage(f"Autosave failed: {str(e)}", 3000)
+                self.autosave_label.setText("Save Failed")
+                self.autosave_label.setStyleSheet("color: red; padding: 2px 5px; border: 1px solid red; border-radius: 3px;")
+
+
+
+
+    def autosave_stream(self):
+        """Trigger autosave with debounce"""
+        if hasattr(self, 'current_element'):
+            self.autosave_timer.start(1000)  # 1 second delay
+            self.autosave_label.setText("Saving...")
+            self.autosave_label.setStyleSheet("color: orange; padding: 2px 5px; border: 1px solid orange; border-radius: 3px;")
+
+
+
+    def handle_editing_finished(self):
+        """Called when editing is finished in any field"""
+        if self.current_file:
+            self.unsaved_changes = True
+            self.update_stream()  # This ensures the XML is updated immediately
+            self.autosave_timer.start(1000)  # 1 second delay
+            self.statusBar.showMessage("Changes pending...", 1000)
 
     def initUI(self):
         # Set window properties
@@ -58,7 +104,13 @@ class SeisCompInventoryEditor(QMainWindow):
         # Create status bar
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
-        
+
+        # Add permanent autosave indicator
+        self.autosave_label = QLabel("Autosave Ready")
+        self.autosave_label.setStyleSheet("color: green; padding: 2px 5px; border: 1px solid green; border-radius: 3px;")
+        self.statusBar.addPermanentWidget(self.autosave_label)
+
+
         # Create central widget and main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -163,6 +215,52 @@ class SeisCompInventoryEditor(QMainWindow):
         
         # Create menu bar
         self.createMenuBar()
+
+    def save_expanded_state(self):
+        """Save the current expanded state of the tree"""
+        expanded_items = []
+        iterator = QTreeWidgetItemIterator(self.tree_widget)
+        while iterator.value():
+            item = iterator.value()
+            if item.isExpanded():
+                # Save the path to this item (e.g., "Network/Station/Location")
+                path = []
+                current = item
+                while current:
+                    path.insert(0, current.text(0))
+                    current = current.parent()
+                expanded_items.append('/'.join(path))
+            iterator += 1
+        return expanded_items
+
+    def restore_expanded_state(self, expanded_items):
+        """Restore the expanded state of the tree"""
+        if not expanded_items:
+            return
+            
+        def expand_path(item, path_parts):
+            """Recursively expand items matching the path"""
+            if not path_parts:
+                return
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if child.text(0) == path_parts[0]:
+                    if len(path_parts) == 1:
+                        child.setExpanded(True)
+                    else:
+                        child.setExpanded(True)
+                        expand_path(child, path_parts[1:])
+        
+        # Process each saved path
+        for path in expanded_items:
+            path_parts = path.split('/')
+            # Start from root items
+            for i in range(self.tree_widget.topLevelItemCount()):
+                root_item = self.tree_widget.topLevelItem(i)
+                if root_item.text(0) == path_parts[0]:
+                    root_item.setExpanded(True)
+                    if len(path_parts) > 1:
+                        expand_path(root_item, path_parts[1:])
 
     def setup_station_tab(self):
         layout = QFormLayout(self.station_tab)
@@ -302,40 +400,38 @@ class SeisCompInventoryEditor(QMainWindow):
         stream_group = QGroupBox("Stream/Channel Information")
         stream_layout = QFormLayout()
         
-        # Create validated input fields
-        self.stream_code = ValidationLineEdit(required=True)
-        
-        # Time fields
-        self.stream_start = ValidationLineEdit()
-        self.stream_end = ValidationLineEdit()
-        
-        # Position fields
+        # Create validated input fields with proper parent
+        self.stream_code = ValidationLineEdit(required=True, parent=self)
+        self.stream_start = ValidationLineEdit(parent=self)
+        self.stream_end = ValidationLineEdit(parent=self)
         self.stream_depth = ValidationLineEdit(
-            validator=lambda x: re.match(r'^-?\d*\.?\d*$', x) if x else True
+            validator=lambda x: re.match(r'^-?\d*\.?\d*$', x) if x else True,
+            parent=self
         )
         self.stream_azimuth = ValidationLineEdit(
-            validator=lambda x: re.match(r'^-?\d*\.?\d*$', x) and 0 <= float(x) <= 360 if x else True
+            validator=lambda x: re.match(r'^-?\d*\.?\d*$', x) and 0 <= float(x) <= 360 if x else True,
+            parent=self
         )
         self.stream_dip = ValidationLineEdit(
-            validator=lambda x: re.match(r'^-?\d*\.?\d*$', x) and -90 <= float(x) <= 90 if x else True
+            validator=lambda x: re.match(r'^-?\d*\.?\d*$', x) and -90 <= float(x) <= 90 if x else True,
+            parent=self
         )
-        
-        # Gain and sampling fields
         self.stream_gain = ValidationLineEdit(
-            validator=lambda x: re.match(r'^-?\d*\.?\d*$', x) if x else True
+            validator=lambda x: re.match(r'^-?\d*\.?\d*$', x) if x else True,
+            parent=self
         )
         self.stream_sampleRate = ValidationLineEdit(
-            validator=lambda x: re.match(r'^\d*\.?\d*$', x) if x else True
+            validator=lambda x: re.match(r'^\d*\.?\d*$', x) if x else True,
+            parent=self
         )
         self.stream_gainFrequency = ValidationLineEdit(
-            validator=lambda x: re.match(r'^\d*\.?\d*$', x) if x else True
+            validator=lambda x: re.match(r'^\d*\.?\d*$', x) if x else True,
+            parent=self
         )
-        self.stream_gainUnit = ValidationLineEdit()
-        
-        # Additional fields
-        self.stream_datalogger_serialnumber = ValidationLineEdit()
-        self.stream_sensor_serialnumber = ValidationLineEdit()
-        self.stream_flags = ValidationLineEdit()
+        self.stream_gainUnit = ValidationLineEdit(parent=self)
+        self.stream_datalogger_serialnumber = ValidationLineEdit(parent=self)
+        self.stream_sensor_serialnumber = ValidationLineEdit(parent=self)
+        self.stream_flags = ValidationLineEdit(parent=self)
         
         # Add fields to layout
         stream_layout.addRow("Code:", self.stream_code)
@@ -490,23 +586,123 @@ class SeisCompInventoryEditor(QMainWindow):
         inventory = root.find('sc3:Inventory', self.ns)
         return inventory is not None
 
+    def register_namespaces(self):
+        """Register the namespace to avoid sc3: prefix"""
+        ET.register_namespace('', self.ns['sc3'])
+        ET.register_namespace('xmlns', self.ns['sc3'])
+
+
     def save_xml(self):
+        """Save XML while preserving exact original formatting"""
         if self.current_file and self.tree:
             try:
                 # Create backup
-                backup_path = Path(self.current_file).with_suffix('.xml.bak')
-                Path(self.current_file).rename(backup_path)
+                current_path = Path(self.current_file)
+                backup_path = current_path.with_suffix('.xml.bak')
                 
-                # Save new file
-                self.tree.write(self.current_file, encoding='utf-8', xml_declaration=True)
+                if current_path.exists():
+                    current_path.rename(backup_path)
+                
+                # Read the original file content
+                with open(backup_path, 'r', encoding='UTF-8') as f:
+                    content = f.read()
+                
+                # Apply each tracked change
+                if hasattr(self, 'modified_elements'):
+                    for element_id, changes in self.modified_elements.items():
+                        # Find the element in the content
+                        element_start = content.find(f'publicID="{element_id}"')
+                        if element_start != -1:
+                            # Find element boundaries
+                            block_start = content.rfind('<', 0, element_start)
+                            block_end = content.find('</stream>', element_start)
+                            if block_end == -1:
+                                block_end = content.find('>', element_start) + 1
+                            
+                            # Get the element's content
+                            element_content = content[block_start:block_end]
+                            
+                            # Get proper indentation
+                            lines = element_content.split('\n')
+                            if len(lines) > 1:
+                                # Get indentation from the second line
+                                indent_match = re.match(r'^(\s+)', lines[1])
+                                child_indent = indent_match.group(1) if indent_match else '            '
+                            else:
+                                child_indent = '            '
+                            
+                            modified_content = element_content
+                            
+                            # Apply each change
+                            for field, new_value in changes.items():
+                                # Look for existing field
+                                field_tag = f"<{field}>"
+                                field_start = modified_content.find(field_tag)
+                                
+                                if field_start != -1:
+                                    # Update existing field
+                                    field_end = modified_content.find(f"</{field}>", field_start)
+                                    if field_end != -1:
+                                        field_content = modified_content[field_start:field_end + len(f"</{field}>")]
+                                        new_field_content = f"<{field}>{new_value}</{field}>"
+                                        modified_content = modified_content.replace(
+                                            field_content,
+                                            new_field_content
+                                        )
+                                else:
+                                    # Add new field with proper indentation
+                                    # Find the last complete element
+                                    last_elem_end = -1
+                                    for line in reversed(modified_content.split('\n')):
+                                        if line.strip().endswith('</shared>'):
+                                            last_elem_end = modified_content.rfind('</shared>')
+                                            break
+                                        if line.strip().endswith('/>'):
+                                            last_elem_end = modified_content.rfind('/>')
+                                            break
+                                        if line.strip().endswith('>'):
+                                            close_tag = line.strip()[2:-1]  # Get tag name from </tag>
+                                            if close_tag and modified_content.rfind(f'</{close_tag}>') != -1:
+                                                last_elem_end = modified_content.rfind(f'</{close_tag}>')
+                                                break
+                                    
+                                    if last_elem_end != -1:
+                                        # Insert after the last complete element
+                                        new_field_content = f"\n{child_indent}<{field}>{new_value}</{field}>"
+                                        end_tag_pos = modified_content.find('>', last_elem_end) + 1
+                                        modified_content = (
+                                            modified_content[:end_tag_pos] +
+                                            new_field_content +
+                                            modified_content[end_tag_pos:]
+                                        )
+                            
+                            # Replace the original content with modified content
+                            content = content[:block_start] + modified_content + content[block_end:]
+                
+                # Write the modified content back to file
+                with open(str(current_path), 'w', encoding='UTF-8') as f:
+                    f.write(content)
+                
+                # Clear tracking
+                self.modified_elements = {}
                 self.unsaved_changes = False
+                
                 self.statusBar.showMessage("File saved successfully", 5000)
+                self.autosave_label.setText("Changes Saved")
+                self.autosave_label.setStyleSheet(
+                    "color: green; padding: 2px 5px; border: 1px solid green; border-radius: 3px;"
+                )
+                
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save XML: {str(e)}")
-                # Restore backup if exists
                 if backup_path.exists():
-                    backup_path.rename(self.current_file)
+                    backup_path.rename(current_path)
+                self.autosave_label.setText("Save Failed")
+                self.autosave_label.setStyleSheet(
+                    "color: red; padding: 2px 5px; border: 1px solid red; border-radius: 3px;"
+                )
 
+                    
     def populate_tree(self):
         self.tree_widget.clear()
         inventory = self.root.find('sc3:Inventory', self.ns)
@@ -561,16 +757,24 @@ class SeisCompInventoryEditor(QMainWindow):
         elem = element.find(f'sc3:{tag}', self.ns)
         return elem.text if elem is not None else default
 
-    def _update_element_text(self, element, tag, value):
-        """Helper method to update element text with namespace"""
+    def _update_element_text(self, element, tag, value, old_value=None):
+        """Helper method to update element text with namespace and change tracking"""
         elem = element.find(f'sc3:{tag}', self.ns)
+        
         if elem is None:
             if value:  # Only create new elements for non-empty values
                 elem = ET.SubElement(element, f'{{{self.ns["sc3"]}}}{tag}')
-        if value:
-            elem.text = value
-        elif elem is not None:
-            element.remove(elem)  # Remove element if value is empty
+                elem.text = value
+                self.unsaved_changes = True
+        else:
+            current_value = elem.text if elem.text is not None else ""
+            if value != current_value:  # Only update if value has changed
+                if value:
+                    elem.text = value
+                else:
+                    element.remove(elem)
+                self.unsaved_changes = True
+
 
     def update_station(self):
         if hasattr(self, 'current_element'):
@@ -625,44 +829,80 @@ class SeisCompInventoryEditor(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to update datalogger: {str(e)}")
 
     def update_stream(self):
+        """Update the XML element with values from the stream fields"""
         if hasattr(self, 'current_element'):
             try:
-                # Update basic attributes
-                self.current_element.set('code', self.stream_code.text())
+                # Save current expanded state
+                expanded_state = self.save_expanded_state()
                 
-                # Update time fields
-                self._update_element_text(self.current_element, 'start', self.stream_start.text())
-                self._update_element_text(self.current_element, 'end', self.stream_end.text())
+                # Initialize modified elements tracking if not exists
+                if not hasattr(self, 'modified_elements'):
+                    self.modified_elements = {}
                 
-                # Update position fields
-                self._update_element_text(self.current_element, 'depth', self.stream_depth.text())
-                self._update_element_text(self.current_element, 'azimuth', self.stream_azimuth.text())
-                self._update_element_text(self.current_element, 'dip', self.stream_dip.text())
+                # Track current values and changes
+                element_id = self.current_element.get('publicID', '')
+                current_values = {
+                    'depth': self._get_element_text(self.current_element, 'depth'),
+                    'azimuth': self._get_element_text(self.current_element, 'azimuth'),
+                    'dip': self._get_element_text(self.current_element, 'dip'),
+                    'gain': self._get_element_text(self.current_element, 'gain'),
+                    'gainFrequency': self._get_element_text(self.current_element, 'gainFrequency'),
+                    'gainUnit': self._get_element_text(self.current_element, 'gainUnit'),
+                }
                 
-                # Update gain and sampling fields
-                self._update_element_text(self.current_element, 'gain', self.stream_gain.text())
+                # Process each field
+                fields_to_update = {
+                    'depth': self.stream_depth.text(),
+                    'azimuth': self.stream_azimuth.text(),
+                    'dip': self.stream_dip.text(),
+                    'gain': self.stream_gain.text(),
+                    'gainFrequency': self.stream_gainFrequency.text(),
+                    'gainUnit': self.stream_gainUnit.text(),
+                }
                 
-                # Handle sample rate conversion
-                try:
-                    sample_rate = float(self.stream_sampleRate.text())
-                    self._update_element_text(self.current_element, 'sampleRateNumerator', str(int(sample_rate)))
-                    self._update_element_text(self.current_element, 'sampleRateDenominator', '1')
-                except (ValueError, TypeError):
-                    pass
+                # Store changes for saving
+                changes = {}
+                changes_made = False
                 
-                self._update_element_text(self.current_element, 'gainFrequency', self.stream_gainFrequency.text())
-                self._update_element_text(self.current_element, 'gainUnit', self.stream_gainUnit.text())
+                for field, new_value in fields_to_update.items():
+                    current = current_values.get(field, '')
+                    if new_value != current:
+                        tag = f"sc3:{field}"
+                        elem = self.current_element.find(tag, self.ns)
+                        
+                        if elem is None and new_value:
+                            # Create new element if it doesn't exist
+                            elem = ET.SubElement(self.current_element, f'{{{self.ns["sc3"]}}}{field}')
+                            elem.text = new_value
+                            changes_made = True
+                            changes[field] = new_value
+                        elif elem is not None:
+                            if new_value:
+                                # Update existing element
+                                elem.text = new_value
+                                changes_made = True
+                                changes[field] = new_value
+                            else:
+                                # Remove element if value is empty
+                                self.current_element.remove(elem)
+                                changes_made = True
+                                changes[field] = ''
                 
-                # Update additional fields
-                self._update_element_text(self.current_element, 'dataloggerSerialNumber', self.stream_datalogger_serialnumber.text())
-                self._update_element_text(self.current_element, 'sensorSerialNumber', self.stream_sensor_serialnumber.text())
-                self._update_element_text(self.current_element, 'flags', self.stream_flags.text())
-                
-                self.populate_tree()
-                self.unsaved_changes = True
-                self.statusBar.showMessage("Stream updated successfully", 5000)
+                if changes_made:
+                    # Store changes for saving
+                    if element_id:
+                        self.modified_elements[element_id] = changes
+                    self.unsaved_changes = True
+                    
+                    # Update tree while preserving expanded state
+                    self.populate_tree()
+                    self.restore_expanded_state(expanded_state)
+                    
+                    self.statusBar.showMessage("Stream updated successfully", 5000)
+                    
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to update stream: {str(e)}")
+                self.statusBar.showMessage(f"Update failed: {str(e)}", 5000)
 
     def item_selected(self, item):
         if not item:
@@ -707,50 +947,53 @@ class SeisCompInventoryEditor(QMainWindow):
         self.datalogger_serial.setText(self._get_element_text(datalogger, 'serialNumber'))
 
     def populate_stream_fields(self, stream):
-        # Basic attributes
-        self.stream_code.setText(stream.get('code', ''))
-        
-        # Time fields
-        self.stream_start.setText(self._get_element_text(stream, 'start'))
-        self.stream_end.setText(self._get_element_text(stream, 'end'))
-        
-        # Position fields
-        self.stream_depth.setText(self._get_element_text(stream, 'depth'))
-        self.stream_azimuth.setText(self._get_element_text(stream, 'azimuth'))
-        self.stream_dip.setText(self._get_element_text(stream, 'dip'))
-        
-        # Gain and sampling fields
-        self.stream_gain.setText(self._get_element_text(stream, 'gain'))
-        
-        # Calculate sample rate from numerator/denominator
-        numerator = self._get_element_text(stream, 'sampleRateNumerator', '0')
-        denominator = self._get_element_text(stream, 'sampleRateDenominator', '1')
+        """Populate all stream fields from the XML element"""
         try:
-            sample_rate = float(numerator) / float(denominator)
-            self.stream_sampleRate.setText(str(sample_rate))
-        except (ValueError, ZeroDivisionError):
-            self.stream_sampleRate.setText('')
-        
-        self.stream_gainFrequency.setText(self._get_element_text(stream, 'gainFrequency'))
-        self.stream_gainUnit.setText(self._get_element_text(stream, 'gainUnit'))
-        
-        # Additional fields
-        self.stream_datalogger_serialnumber.setText(self._get_element_text(stream, 'dataloggerSerialNumber'))
-        self.stream_sensor_serialnumber.setText(self._get_element_text(stream, 'sensorSerialNumber'))
-        self.stream_flags.setText(self._get_element_text(stream, 'flags'))
+            # Basic attributes
+            self.stream_code.setText(stream.get('code', ''))
+            
+            # Time fields
+            self.stream_start.setText(self._get_element_text(stream, 'start'))
+            self.stream_end.setText(self._get_element_text(stream, 'end'))
+            
+            # Position fields
+            self.stream_depth.setText(self._get_element_text(stream, 'depth'))
+            self.stream_azimuth.setText(self._get_element_text(stream, 'azimuth'))
+            self.stream_dip.setText(self._get_element_text(stream, 'dip'))
+            
+            # Gain and sampling fields
+            self.stream_gain.setText(self._get_element_text(stream, 'gain'))
+            
+            # Calculate sample rate from numerator/denominator
+            numerator = self._get_element_text(stream, 'sampleRateNumerator', '0')
+            denominator = self._get_element_text(stream, 'sampleRateDenominator', '1')
+            try:
+                if numerator and denominator and float(denominator) != 0:
+                    sample_rate = float(numerator) / float(denominator)
+                    self.stream_sampleRate.setText(f"{sample_rate:.1f}")
+                else:
+                    self.stream_sampleRate.setText('')
+            except (ValueError, ZeroDivisionError):
+                self.stream_sampleRate.setText('')
+            
+            self.stream_gainFrequency.setText(self._get_element_text(stream, 'gainFrequency'))
+            self.stream_gainUnit.setText(self._get_element_text(stream, 'gainUnit'))
+            
+            # Additional fields
+            self.stream_datalogger_serialnumber.setText(self._get_element_text(stream, 'dataloggerSerialNumber'))
+            self.stream_sensor_serialnumber.setText(self._get_element_text(stream, 'sensorSerialNumber'))
+            self.stream_flags.setText(self._get_element_text(stream, 'flags'))
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Warning", f"Error populating stream fields: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)
-    
-    # Set application-wide style
     app.setStyle('Fusion')
-    
-    # Set color palette
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(240, 240, 240))
     palette.setColor(QPalette.WindowText, QColor(0, 0, 0))
     app.setPalette(palette)
-    
     editor = SeisCompInventoryEditor()
     editor.show()
     sys.exit(app.exec_())
